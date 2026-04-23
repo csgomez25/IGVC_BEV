@@ -1,0 +1,91 @@
+# =============================================================================
+#  AVL BEV Perception Config (v3) — IGVC AutoNav
+#
+#  3x ZED X cameras + IGVC-tuned hybrid segmentation (HSV + optional ONNX).
+#  Decoupled perception/visualization timers.
+#
+#  Cameras:
+#    Left   : ZED X (S/N 43779087)
+#    Front  : ZED X (S/N 42569280)
+#    Right  : ZED X (S/N 49910017)
+# =============================================================================
+
+bev_perception_node:
+  ros__parameters:
+
+    # ---- BEV grid --------------------------------------------------------
+    bev:
+      x_range: [-10.0, 15.0]      # behind .. ahead (meters)
+      y_range: [-10.0, 10.0]      # right .. left
+      resolution: 0.05            # meters per pixel
+      # Tighter floor than v2 so painted lines / potholes survive the filter.
+      # Classes in GROUND_PLANE_CLASSES (see bev_perception_node.py) get an
+      # exemption from the lower bound regardless of this value.
+      height_range: [-0.05, 2.5]
+
+    # ---- Mount poses (base_link, REP-103: X fwd, Y left, Z up) ----------
+    cameras:
+      left:                       # ZED X 43779087
+        mount_x: -0.10
+        mount_y:  0.35
+        mount_z:  0.60
+        mount_yaw: 1.5708         # +90 deg
+      front:                      # ZED X 42569280
+        mount_x:  0.35
+        mount_y:  0.0
+        mount_z:  0.75
+        mount_yaw: 0.0
+      right:                      # ZED X 49910017
+        mount_x: -0.10
+        mount_y: -0.35
+        mount_z:  0.60
+        mount_yaw: -1.5708        # -90 deg
+
+    depth:
+      min: 0.3
+      max: 12.0                   # IGVC course is small, drop far depth noise
+
+    # ---- Segmentation ----------------------------------------------------
+    segmentation:
+      enabled: true
+      tier2_model_path: ''        # leave empty until you have an IGVC-trained ONNX
+      device: 'cuda'              # 'cuda' or 'cpu'
+      min_line_area_px:   30      # drop tiny white speckle (paint chips, glints)
+      min_barrel_area_px: 200     # drop small orange specks
+
+      # Tier 1 HSV thresholds (OpenCV: H 0-179, S 0-255, V 0-255).
+      # Tune these at the venue with tools/calibrate_hsv.py if lighting is odd.
+      hsv:
+        white:                    # IGVC lane lines
+          h_min:   0
+          h_max: 179
+          s_min:   0
+          s_max:  60
+          v_min: 180
+          v_max: 255
+        orange:                   # IGVC traffic barrels
+          h_min:   5
+          h_max:  20
+          s_min: 130
+          s_max: 255
+          v_min: 100
+          v_max: 255
+
+    # ---- Perception loop (machine outputs) -------------------------------
+    perception:
+      fps: 20.0                   # publishes /bev/segmentation, drivable_mask, obstacle_mask
+      downsample_depth: 2         # 1 = full res, 2 = half, 4 = quarter
+
+    # ---- Visualization loop (BGR images for humans) ----------------------
+    viz:
+      enabled: true               # set false for race runs to save CPU/network
+      fps: 2.0                    # /bev/image_raw, /bev/fused publish rate
+      publish_debug: true         # also publish /bev/debug/<cam>
+      overlay_alpha: 0.5
+
+    # ---- Output mask shaping --------------------------------------------
+    output:
+      # Dilate the obstacle mask by this many BEV pixels so the planner
+      # has built-in safety margin around real obstacles.
+      # 4 px @ 0.05 m/px = 20 cm margin.
+      obstacle_dilate_px: 4
