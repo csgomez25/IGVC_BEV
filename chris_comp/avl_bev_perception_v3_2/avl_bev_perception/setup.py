@@ -6,7 +6,7 @@ package_name = 'avl_bev_perception'
 
 setup(
     name=package_name,
-    version='3.0.0',
+    version='3.2.2',
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages',

@@ -1,14 +1,22 @@
 # =============================================================================
-#  AVL BEV Perception Config (v3.2) — IGVC AutoNav
+#  AVL BEV Perception Config (v3.2.2) — IGVC AutoNav
 #
 #  3x ZED X cameras + IGVC-tuned hybrid segmentation (HSV + Otsu + optional ONNX).
 #  Decoupled perception/visualization timers.
 #  Optimized for Jetson AGX Orin + tank/differential drive.
 #
-#  Cameras:
+#  Camera serial mapping (v3.2.2: aligned with the team's IGVC_ROS2 stack at
+#  references/parsa_igvc/src/avros_bringup/launch/sensors.launch.py —
+#  "Verified 2026-04-24 via per-port enumeration." Pre-v3.2.2 had left/right
+#  swapped):
 #    Left   : ZED X (S/N 43779087)
 #    Front  : ZED X (S/N 42569280)
 #    Right  : ZED X (S/N 49910017)
+#
+#  Mount poses derived from the team measurement sketch (inches, IMU-based
+#  footprint origin, sketch axes X=right Y=forward Z=up). Converted here to
+#  REP-103 (X=forward, Y=left, Z=up) and meters. See docs sketch + Section 7
+#  of CHANGELOG_AND_DESIGN_v3.2.docx.
 # =============================================================================
 
 bev_perception_node:
@@ -24,23 +32,71 @@ bev_perception_node:
       # exemption from the lower bound regardless of this value.
       height_range: [-0.05, 2.5]
 
-    # ---- Mount poses (base_link, REP-103: X fwd, Y left, Z up) ----------
+    # ---- Mount poses (base_link, REP-103: X fwd, Y left, Z up) -----------
+    # Origin = IMU-based footprint (sketch (0,0,0)).
+    # Conversion from sketch:  X_rep = Y_sketch (inches → m),
+    #                          Y_rep = -X_sketch (inches → m),
+    #                          Z_rep =  Z_sketch (inches → m).
+    # Topic-path defaults below assume zed-ros2-wrapper v5.x.
+    # For v4.x bringups: rgb path is /zed_<cam>/zed_node/rgb/image_rect_color
+    # and info path is /zed_<cam>/zed_node/rgb/camera_info — override here
+    # or via `ros2 param set`.
     cameras:
-      left:                       # ZED X 43779087
-        mount_x: -0.10
-        mount_y:  0.35
-        mount_z:  0.60
-        mount_yaw: 1.5708         # +90 deg
-      front:                      # ZED X 42569280
-        mount_x:  0.35
-        mount_y:  0.0
-        mount_z:  0.75
+      left:                       # ZED X 43779087  — sketch (-11.5, 4, 19.5) in
+        mount_x:  0.102           # 4    in fwd  -> 0.1016 m
+        mount_y:  0.292           # 11.5 in left -> 0.2921 m
+        mount_z:  0.495           # 19.5 in up   -> 0.4953 m
+        mount_yaw: 1.5708         # +90 deg, looking left (measured ~exactly 90)
+        rgb_topic:   /zed_left/zed_node/rgb/color/rect/image
+        depth_topic: /zed_left/zed_node/depth/depth_registered
+        info_topic:  /zed_left/zed_node/rgb/color/rect/camera_info
+        cloud_topic: /zed_left/zed_node/point_cloud/cloud_registered
+      front:                      # ZED X 42569280  — sketch (0, 16, 19.5) in
+        mount_x:  0.406           # 16   in fwd  -> 0.4064 m
+        mount_y:  0.000
+        mount_z:  0.495           # 19.5 in up
         mount_yaw: 0.0
-      right:                      # ZED X 49910017
-        mount_x: -0.10
-        mount_y: -0.35
-        mount_z:  0.60
-        mount_yaw: -1.5708        # -90 deg
+        rgb_topic:   /zed_front/zed_node/rgb/color/rect/image
+        depth_topic: /zed_front/zed_node/depth/depth_registered
+        info_topic:  /zed_front/zed_node/rgb/color/rect/camera_info
+        cloud_topic: /zed_front/zed_node/point_cloud/cloud_registered
+      right:                      # ZED X 49910017  — sketch (11.5, 4, 19.5) in
+        mount_x:  0.102           # 4    in fwd
+        mount_y: -0.292           # 11.5 in right (negative in REP-103)
+        mount_z:  0.495           # 19.5 in up
+        mount_yaw: -1.5708        # -90 deg, looking right
+        rgb_topic:   /zed_right/zed_node/rgb/color/rect/image
+        depth_topic: /zed_right/zed_node/depth/depth_registered
+        info_topic:  /zed_right/zed_node/rgb/color/rect/camera_info
+        cloud_topic: /zed_right/zed_node/point_cloud/cloud_registered
+
+    # ---- Kiwicampus / Nav2 joint-deployment adapter (path A) -------------
+    # When enabled, ALSO publishes per-camera `/perception/<cam>/{semantic_mask,
+    # semantic_confidence, semantic_points, label_info}` so Parsa's
+    # `kiwicampus/semantic_segmentation_layer` Nav2 plugin can consume our
+    # Tier 1 segmentation directly. Existing /bev/* outputs are unaffected.
+    # See "Integration with Parsa's Stack" in CLAUDE.md for the contract.
+    # Default OFF — standalone vision testing is unchanged.
+    kiwicampus:
+      enabled: false
+      # Namespace prefix for the per-camera contract topics.
+      #   '/perception'     (default) — drops straight into Parsa's
+      #                       nav2_params_humble.yaml semantic_layer sources,
+      #                       which already point at /perception/<cam>/semantic_*.
+      #                       Use this to FILL his configured-but-empty left/right
+      #                       sources (no collision — his perception_node is
+      #                       front-only).
+      #   '/bev_perception' — run ALONGSIDE his front perception_node without a
+      #                       topic collision; then add the prefixed topics as an
+      #                       extra observation_source under his semantic_layer.
+      topic_prefix: /perception
+      # Class names emitted in the latched LabelInfo. IDs 0-3 + 255 use
+      # Parsa's class_map.yaml names verbatim (free / lane_white /
+      # barrel_orange / pothole / unknown) so his nav2_params_humble.yaml
+      # class_types: [...] lists pick them up. IDs 4 (person) and 5
+      # (drivable) keep our names — kiwicampus silently ignores names not
+      # in class_types, which is the intended behavior for Tier-2-only
+      # classes.
 
     depth:
       min: 0.3
@@ -80,11 +136,17 @@ bev_perception_node:
       # s_min for white and orange respectively.
       hsv:
         white:                    # IGVC lane lines
+          # 2026-05-13: v_min 180 -> 200, s_max kept at 60 to match Parsa's
+          # avros_perception/config/perception.yaml after his white-on-grass
+          # field retune (Parsa: lane_low=[0,0,200], lane_high=[179,60,255]).
+          # His sampling found grass S median 111 / V p95 188, so V>=200 + S<=60
+          # cleanly separates paint from grass. Auto-cal still overrides v_min
+          # at startup; this is the fallback / pre-warmup value.
           h_min:   0
           h_max: 179
           s_min:   0
           s_max:  60
-          v_min: 180
+          v_min: 200
           v_max: 255
         orange:                   # IGVC traffic barrels
           h_min:   5

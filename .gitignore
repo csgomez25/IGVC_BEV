@@ -1,0 +1,14 @@
+# Parsa's IGVC_ROS2 stack — read-only reference checkout, his IP, 165 MB,
+# its own git repo. Not republished here.
+chris_comp/references/
+
+# Python caches / build artifacts
+__pycache__/
+*.pyc
+build/
+install/
+log/
+
+# Local bundles
+*.tgz
+*.tar.gz

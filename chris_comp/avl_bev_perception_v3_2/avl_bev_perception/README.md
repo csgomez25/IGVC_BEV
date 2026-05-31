@@ -1,4 +1,4 @@
-# avl_bev_perception (v3.2 — IGVC AutoNav)
+# avl_bev_perception (v3.2.2 — IGVC AutoNav)
 
 3-camera ZED X Bird's Eye View perception tuned for the IGVC AutoNav course.
 Hybrid segmentation (HSV + Otsu + optional ONNX), decoupled perception/viz
@@ -32,6 +32,9 @@ timers, optimized for **Jetson AGX Orin** + tank/differential drive.
   memory write per frame in race mode.
 
 ## Cameras
+
+Authoritative mapping (v3.2.2 — verified per-port 2026-04-24, matches the
+team's IGVC_ROS2 sensors.launch.py):
 
 | Position | Model | Serial   |
 |----------|-------|----------|
@@ -74,13 +77,45 @@ ros2 param set /bev_perception_node segmentation.auto_calibrate false
 ros2 run rqt_image_view rqt_image_view /bev/fused
 ```
 
+## Standalone vision testing
+
+Run BEV perception by itself — no Xsens, no Velodyne, no Nav2, no
+actuator. Two modes, same launch file:
+
+```bash
+# A) Live cameras (default). Brings up ZED bringup + BEV node + RViz.
+ros2 launch avl_bev_perception vision_test.launch.py
+
+# B) Bag replay — develop off the Jetson, no cameras attached.
+ros2 launch avl_bev_perception vision_test.launch.py \
+    use_bag:=true bag_path:=/data/bev_session_20260513T...
+```
+
+Record a replay-able bag from the live robot:
+
+```bash
+# Defaults to /tmp/bev_session_<timestamp>, all 3 cameras, mcap+zstd.
+./avl_bev_perception/tools/record_session.sh
+
+# Custom output, front camera only:
+./avl_bev_perception/tools/record_session.sh /data/run_42 front
+```
+
+The bag captures only the topic set BEV needs (per camera: rgb rect,
+camera_info, depth_registered) plus `/tf` and `/tf_static`. Vision-only —
+IMU/LiDAR are out of scope.
+
 ## Topics
 
 ### Subscribed (per camera, `<cam>` = `left` | `front` | `right`)
 
-- `/zed_<cam>/zed_node/rgb/image_rect_color`   sensor_msgs/Image
-- `/zed_<cam>/zed_node/depth/depth_registered` sensor_msgs/Image
-- `/zed_<cam>/zed_node/rgb/camera_info`        sensor_msgs/CameraInfo
+Defaults assume zed-ros2-wrapper **v5.x** (changed in v3.2.2). For v4.x
+bringups, override per camera via `cameras.<cam>.{rgb,depth,info}_topic`
+in `config/bev_config.yaml` or with `ros2 param set`.
+
+- `/zed_<cam>/zed_node/rgb/color/rect/image`        sensor_msgs/Image
+- `/zed_<cam>/zed_node/depth/depth_registered`      sensor_msgs/Image
+- `/zed_<cam>/zed_node/rgb/color/rect/camera_info`  sensor_msgs/CameraInfo
 
 ### Published — perception loop (default 20 Hz, machine consumable)
 
@@ -98,14 +133,20 @@ ros2 run rqt_image_view rqt_image_view /bev/fused
 
 ## Class set (IGVC)
 
-| ID | Class            | Source                         | Color (BGR)     |
-|----|------------------|--------------------------------|-----------------|
-| 0  | background       | —                              | (0, 0, 0)       |
-| 1  | lane line        | Tier 1a (HSV white)            | (255, 255, 255) |
-| 2  | barrel           | Tier 1b (HSV orange)           | (0, 140, 255)   |
-| 3  | person           | Tier 2 (ONNX, optional)        | (0, 255, 255)   |
-| 4  | pothole          | Tier 1c (Otsu) or Tier 2       | (255, 0, 255)   |
-| 5  | drivable area    | Tier 2 (ONNX, optional)        | (0, 180, 0)     |
+IDs 0–3 + 255 mirror the team's `class_map.yaml` so this mask publishes
+directly to the kiwicampus `semantic_segmentation_layer` contract without
+remapping. IDs 4–5 are local extensions and do not appear in the team
+class_map (Parsa's costmap will silently ignore them).
+
+| ID  | Class            | Parsa class_map  | Source                         | Color (BGR)     |
+|-----|------------------|------------------|--------------------------------|-----------------|
+| 0   | background       | `free`           | —                              | (0, 0, 0)       |
+| 1   | lane line        | `lane_white`     | Tier 1a (HSV white)            | (255, 255, 255) |
+| 2   | barrel           | `barrel_orange`  | Tier 1b (HSV orange)           | (0, 140, 255)   |
+| 3   | pothole          | `pothole`        | Tier 1c (Otsu) or Tier 2       | (255, 0, 255)   |
+| 4   | person           | (not present)    | Tier 2 (ONNX, optional)        | (0, 255, 255)   |
+| 5   | drivable area    | (not present)    | Tier 2 (ONNX, optional)        | (0, 180, 0)     |
+| 255 | unknown          | `unknown`        | reserved for LabelInfo         | (128, 128, 128) |
 
 Tier 1 (HSV + Otsu) runs every frame and handles lanes + barrels + potholes
 on its own — fast (≈3 ms total) and reliable on IGVC's color palette.

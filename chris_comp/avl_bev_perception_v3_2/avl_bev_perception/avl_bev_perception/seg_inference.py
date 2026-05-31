@@ -22,17 +22,21 @@ Two tiers run in series:
     Set `model_path` in config to enable.
 
 Output mask class IDs (uint8, single channel):
-  0 = background
-  1 = lane line          (white, painted)              — Tier 1a
-  2 = barrel             (orange traffic drum)         — Tier 1b
-  3 = person             (pedestrian / judge)          — Tier 2
-  4 = pothole            (painted circle / bright)     — Tier 1c or Tier 2
-  5 = drivable area      (asphalt)                     — Tier 2
+  0   = background       (a.k.a. "free")               — none
+  1   = lane line        (white, painted)              — Tier 1a
+  2   = barrel           (orange traffic drum)         — Tier 1b
+  3   = pothole          (painted circle / bright)     — Tier 1c or Tier 2
+  4   = person           (pedestrian / judge)          — Tier 2
+  5   = drivable area    (asphalt)                     — Tier 2
+  255 = unknown          (reserved for LabelInfo)      — none
+
+IDs 0–3 + 255 match Parsa's class_map.yaml so this mask can be published
+directly to the kiwicampus semantic_segmentation_layer contract.
 
 The BEV node renders these into colored overlays AND derives two binary
 masks for the planner:
-  drivable_mask  = (class == 5)   OR  asphalt-by-default if no Tier 2
-  obstacle_mask  = (class IN {1, 2, 3, 4})
+  drivable_mask  = (class == CLASS_DRIVABLE)   OR  asphalt-by-default if no Tier 2
+  obstacle_mask  = (class IN OBSTACLE_CLASSES) = {lane, barrel, pothole, person}
 """
 
 import os
@@ -42,15 +46,26 @@ import cv2
 import numpy as np
 
 
-# Class IDs — keep in sync with BevPerceptionNode._get_seg_colors()
-CLASS_BACKGROUND = 0
-CLASS_LANE_LINE  = 1
-CLASS_BARREL     = 2
-CLASS_PERSON     = 3
-CLASS_POTHOLE    = 4
-CLASS_DRIVABLE   = 5
+# Class IDs.
+#
+# 0–3 mirror references/parsa_igvc/src/avros_perception/config/class_map.yaml
+# so this package can publish directly to Parsa's kiwicampus
+# semantic_segmentation_layer contract without an ID-remap step.
+# 4–5 are local extensions not (yet) in Parsa's class_map. They're harmless
+# to Parsa's costmap (it just doesn't have class_types entries for them).
+# 255 mirrors his "unknown" sentinel for future LabelInfo publication.
+#
+# Keep in sync with the fallback block in bev_perception_node.py and with
+# _get_seg_colors() in the same file.
+CLASS_BACKGROUND = 0    # ↔ "free"          in Parsa's class_map
+CLASS_LANE_LINE  = 1    # ↔ "lane_white"
+CLASS_BARREL     = 2    # ↔ "barrel_orange"
+CLASS_POTHOLE    = 3    # ↔ "pothole"        (was 4 pre-v3.2.2)
+CLASS_PERSON     = 4    # local extension    (was 3 pre-v3.2.2)
+CLASS_DRIVABLE   = 5    # local extension
+CLASS_UNKNOWN    = 255  # ↔ "unknown"        — reserved for LabelInfo
 
-OBSTACLE_CLASSES = (CLASS_LANE_LINE, CLASS_BARREL, CLASS_PERSON, CLASS_POTHOLE)
+OBSTACLE_CLASSES = (CLASS_LANE_LINE, CLASS_BARREL, CLASS_POTHOLE, CLASS_PERSON)
 
 
 class SegmentationEngine:
@@ -62,7 +77,8 @@ class SegmentationEngine:
     DEFAULT_WHITE_HSV = {
         'h_min':   0, 'h_max': 179,
         's_min':   0, 's_max':  60,   # low saturation = white/gray
-        'v_min': 180, 'v_max': 255,   # high value     = bright
+        'v_min': 200, 'v_max': 255,   # high value = bright; matches Parsa's
+                                      # 2026-05-13 white-on-grass retune
     }
     DEFAULT_ORANGE_HSV = {
         # Orange wraps near H=0; we use a single band that covers the

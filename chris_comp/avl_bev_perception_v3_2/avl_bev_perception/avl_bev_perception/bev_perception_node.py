@@ -60,19 +60,21 @@ try:
     from .seg_inference import (
         SegmentationEngine,
         CLASS_BACKGROUND, CLASS_LANE_LINE, CLASS_BARREL,
-        CLASS_PERSON, CLASS_POTHOLE, CLASS_DRIVABLE,
+        CLASS_POTHOLE, CLASS_PERSON, CLASS_DRIVABLE, CLASS_UNKNOWN,
         OBSTACLE_CLASSES,
     )
     HAS_SEG = True
 except ImportError:
     HAS_SEG = False
+    # Keep these literals in lockstep with seg_inference.py.
     CLASS_BACKGROUND = 0
     CLASS_LANE_LINE  = 1
     CLASS_BARREL     = 2
-    CLASS_PERSON     = 3
-    CLASS_POTHOLE    = 4
+    CLASS_POTHOLE    = 3
+    CLASS_PERSON     = 4
     CLASS_DRIVABLE   = 5
-    OBSTACLE_CLASSES = (1, 2, 3, 4)
+    CLASS_UNKNOWN    = 255
+    OBSTACLE_CLASSES = (CLASS_LANE_LINE, CLASS_BARREL, CLASS_POTHOLE, CLASS_PERSON)
 
 try:
     from .auto_calibrate import AutoHsvCalibrator
@@ -100,9 +102,10 @@ _SEG_COLOR_LUT = np.zeros((256, 3), dtype=np.uint8)
 _SEG_COLOR_LUT[CLASS_BACKGROUND] = (0, 0, 0)
 _SEG_COLOR_LUT[CLASS_LANE_LINE]  = (255, 255, 255)
 _SEG_COLOR_LUT[CLASS_BARREL]     = (0, 140, 255)
-_SEG_COLOR_LUT[CLASS_PERSON]     = (0, 255, 255)
 _SEG_COLOR_LUT[CLASS_POTHOLE]    = (255, 0, 255)
+_SEG_COLOR_LUT[CLASS_PERSON]     = (0, 255, 255)
 _SEG_COLOR_LUT[CLASS_DRIVABLE]   = (0, 180, 0)
+_SEG_COLOR_LUT[CLASS_UNKNOWN]    = (128, 128, 128)
 
 
 # =============================================================================
@@ -138,6 +141,17 @@ class CameraState:
     lut_cos_yaw:  float = 0.0
     lut_sin_yaw:  float = 0.0
 
+    # ---- Kiwicampus adapter state (path A; only used when enabled) ----
+    # rgb_stamp / rgb_frame_id are stashed on the latest RGB msg so the
+    # per-camera publishers can reuse the input sensor stamp (kiwicampus
+    # message-syncs mask + cloud on header.stamp). cloud is the latest
+    # organized PointCloud2 — relayed verbatim with stamp rewritten to
+    # match the published mask.
+    rgb_stamp:     Optional[object] = None   # builtin_interfaces/Time
+    rgb_frame_id:  str = ''
+    cloud:         Optional[object] = None   # sensor_msgs/PointCloud2 (latest)
+    got_cloud:     bool = False
+
 
 # =============================================================================
 #  Main node
@@ -158,8 +172,20 @@ class BevPerceptionNode(Node):
             depth=5,
         )
 
+        # Read kiwicampus gate before _setup_cameras so it can register the
+        # extra cloud subscribers in the same pass.
+        self._kiwi_enabled = bool(
+            self.get_parameter('kiwicampus.enabled').value)
+        # Per-camera kiwicampus publishers, populated in
+        # _init_kiwicampus_adapter() when enabled.
+        self._kiwi_pubs: Dict[str, Dict[str, object]] = {}
+
         self.cameras: Dict[str, CameraState] = {}
         self._setup_cameras()
+        self._check_zed_serials()
+
+        if self._kiwi_enabled:
+            self._init_kiwicampus_adapter()
 
         self._init_bev_grid()
 
@@ -258,6 +284,13 @@ class BevPerceptionNode(Node):
             self.get_logger().info('  Viz           : OFF')
         self.get_logger().info(f'  Segmentation  : '
                                f'{"ON" if self.seg_engine else "OFF"}')
+        if self._kiwi_enabled:
+            _kiwi_prefix = str(
+                self.get_parameter('kiwicampus.topic_prefix').value).rstrip('/')
+            _kiwi_status = f'ON (per-camera {_kiwi_prefix}/<cam>/* adapter)'
+        else:
+            _kiwi_status = 'OFF (standalone /bev/* only)'
+        self.get_logger().info(f'  Kiwicampus    : {_kiwi_status}')
 
     # =========================================================================
     #  Parameters
@@ -285,6 +318,51 @@ class BevPerceptionNode(Node):
         self.declare_parameter('cameras.right.mount_y', -0.35)
         self.declare_parameter('cameras.right.mount_z',  0.60)
         self.declare_parameter('cameras.right.mount_yaw', -1.5708)
+
+        # Camera topic paths. Defaults assume zed-ros2-wrapper v5.x
+        # (`rgb/color/rect/*`). For v4.x bringups override to
+        # `/zed_<cam>/zed_node/rgb/image_rect_color` etc via the YAML config
+        # or `ros2 param set`.
+        self.declare_parameter('cameras.left.rgb_topic',
+                               '/zed_left/zed_node/rgb/color/rect/image')
+        self.declare_parameter('cameras.left.depth_topic',
+                               '/zed_left/zed_node/depth/depth_registered')
+        self.declare_parameter('cameras.left.info_topic',
+                               '/zed_left/zed_node/rgb/color/rect/camera_info')
+        self.declare_parameter('cameras.left.cloud_topic',
+                               '/zed_left/zed_node/point_cloud/cloud_registered')
+
+        self.declare_parameter('cameras.front.rgb_topic',
+                               '/zed_front/zed_node/rgb/color/rect/image')
+        self.declare_parameter('cameras.front.depth_topic',
+                               '/zed_front/zed_node/depth/depth_registered')
+        self.declare_parameter('cameras.front.info_topic',
+                               '/zed_front/zed_node/rgb/color/rect/camera_info')
+        self.declare_parameter('cameras.front.cloud_topic',
+                               '/zed_front/zed_node/point_cloud/cloud_registered')
+
+        self.declare_parameter('cameras.right.rgb_topic',
+                               '/zed_right/zed_node/rgb/color/rect/image')
+        self.declare_parameter('cameras.right.depth_topic',
+                               '/zed_right/zed_node/depth/depth_registered')
+        self.declare_parameter('cameras.right.info_topic',
+                               '/zed_right/zed_node/rgb/color/rect/camera_info')
+        self.declare_parameter('cameras.right.cloud_topic',
+                               '/zed_right/zed_node/point_cloud/cloud_registered')
+
+        # Kiwicampus per-camera adapter (Parsa's Nav2 contract). Off by
+        # default — flipping this on adds /perception/<cam>/* publishers,
+        # subscribes to each camera's organized cloud, and latches a
+        # vision_msgs/LabelInfo so the kiwicampus costmap layer can decode
+        # our class IDs. /bev/* outputs are unaffected.
+        self.declare_parameter('kiwicampus.enabled', False)
+        # Namespace prefix for the per-camera contract topics. Default
+        # '/perception' makes the adapter drop straight into Parsa's
+        # nav2_params_humble.yaml semantic_layer sources (which already point at
+        # /perception/<cam>/semantic_*). Override to e.g. '/bev_perception' to
+        # run alongside his front perception_node without a topic collision,
+        # then add the prefixed topics as an extra observation_source.
+        self.declare_parameter('kiwicampus.topic_prefix', '/perception')
 
         # Depth filter
         self.declare_parameter('depth.min', 0.3)
@@ -359,25 +437,11 @@ class BevPerceptionNode(Node):
         min_d = float(self.get_parameter('depth.min').value)
         max_d = float(self.get_parameter('depth.max').value)
 
-        cam_defs = {
-            'left': {
-                'rgb_topic':   '/zed_left/zed_node/rgb/image_rect_color',
-                'depth_topic': '/zed_left/zed_node/depth/depth_registered',
-                'info_topic':  '/zed_left/zed_node/rgb/camera_info',
-            },
-            'front': {
-                'rgb_topic':   '/zed_front/zed_node/rgb/image_rect_color',
-                'depth_topic': '/zed_front/zed_node/depth/depth_registered',
-                'info_topic':  '/zed_front/zed_node/rgb/camera_info',
-            },
-            'right': {
-                'rgb_topic':   '/zed_right/zed_node/rgb/image_rect_color',
-                'depth_topic': '/zed_right/zed_node/depth/depth_registered',
-                'info_topic':  '/zed_right/zed_node/rgb/camera_info',
-            },
-        }
+        for cam_name in ('left', 'front', 'right'):
+            rgb_topic   = str(self.get_parameter(f'cameras.{cam_name}.rgb_topic').value)
+            depth_topic = str(self.get_parameter(f'cameras.{cam_name}.depth_topic').value)
+            info_topic  = str(self.get_parameter(f'cameras.{cam_name}.info_topic').value)
 
-        for cam_name, cfg in cam_defs.items():
             cam = CameraState(
                 name=cam_name,
                 mount_x=float(self.get_parameter(f'cameras.{cam_name}.mount_x').value),
@@ -389,15 +453,15 @@ class BevPerceptionNode(Node):
             self.cameras[cam_name] = cam
 
             self.create_subscription(
-                Image, cfg['rgb_topic'],
+                Image, rgb_topic,
                 lambda msg, cn=cam_name: self._rgb_callback(cn, msg),
                 self.qos_sensor)
             self.create_subscription(
-                Image, cfg['depth_topic'],
+                Image, depth_topic,
                 lambda msg, cn=cam_name: self._depth_callback(cn, msg),
                 self.qos_sensor)
             self.create_subscription(
-                CameraInfo, cfg['info_topic'],
+                CameraInfo, info_topic,
                 lambda msg, cn=cam_name: self._info_callback(cn, msg),
                 self.qos_sensor)
 
@@ -405,6 +469,182 @@ class BevPerceptionNode(Node):
                 f'  [{cam_name}] yaw={math.degrees(cam.mount_yaw):+.0f}deg  '
                 f'pos=({cam.mount_x:+.2f}, {cam.mount_y:+.2f}, {cam.mount_z:+.2f})'
             )
+            self.get_logger().info(f'  [{cam_name}]   rgb   {rgb_topic}')
+            self.get_logger().info(f'  [{cam_name}]   depth {depth_topic}')
+            self.get_logger().info(f'  [{cam_name}]   info  {info_topic}')
+
+            # Kiwicampus adapter: also subscribe to the camera's organized
+            # cloud. We relay it verbatim under /perception/<cam>/semantic_points
+            # so kiwicampus's TimeSynchronizer sees mask + cloud as a pair.
+            if self._kiwi_enabled:
+                from sensor_msgs.msg import PointCloud2
+                cloud_topic = str(self.get_parameter(
+                    f'cameras.{cam_name}.cloud_topic').value)
+                self.create_subscription(
+                    PointCloud2, cloud_topic,
+                    lambda msg, cn=cam_name: self._cloud_callback(cn, msg),
+                    self.qos_sensor)
+                self.get_logger().info(
+                    f'  [{cam_name}]   cloud {cloud_topic} (kiwicampus adapter)')
+
+    # =========================================================================
+    #  Kiwicampus adapter setup (path A — per-camera Nav2 contract)
+    # =========================================================================
+
+    # IDs 0–3 + 255 use Parsa's class_map.yaml names verbatim so his
+    # nav2_params_humble.yaml `class_types: [...]` lists pick them up.
+    # IDs 4 and 5 keep our local names — kiwicampus silently ignores classes
+    # not listed in class_types, which is the intended behavior.
+    _KIWI_CLASS_NAMES = {
+        CLASS_BACKGROUND: 'free',
+        CLASS_LANE_LINE:  'lane_white',
+        CLASS_BARREL:     'barrel_orange',
+        CLASS_POTHOLE:    'pothole',
+        CLASS_PERSON:     'person',
+        CLASS_DRIVABLE:   'drivable',
+        CLASS_UNKNOWN:    'unknown',
+    }
+
+    def _init_kiwicampus_adapter(self) -> None:
+        """
+        Create per-camera publishers for the kiwicampus contract:
+          /perception/<cam>/semantic_mask        Image mono8       BEST_EFFORT
+          /perception/<cam>/semantic_confidence  Image mono8       BEST_EFFORT
+          /perception/<cam>/semantic_points      PointCloud2       BEST_EFFORT
+          /perception/<cam>/label_info           LabelInfo  latched (TL+REL, d=1)
+        LabelInfo is published once here at startup — kiwicampus is a late
+        joiner via the transient_local QoS.
+        """
+        from sensor_msgs.msg import PointCloud2
+        from rclpy.qos import DurabilityPolicy
+        try:
+            from vision_msgs.msg import LabelInfo, VisionClass
+        except ImportError:
+            self.get_logger().error(
+                'kiwicampus.enabled=true but vision_msgs is not importable. '
+                'Install with `apt install ros-${ROS_DISTRO}-vision-msgs` and '
+                'add <exec_depend>vision_msgs</exec_depend> to package.xml. '
+                'Disabling the adapter for this run.'
+            )
+            self._kiwi_enabled = False
+            return
+
+        # Match Parsa's `qos_profile_sensor_data` for the streaming triple,
+        # and TRANSIENT_LOCAL+RELIABLE depth=1 for the latched label_info.
+        from rclpy.qos import qos_profile_sensor_data
+        label_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
+        prefix = str(self.get_parameter('kiwicampus.topic_prefix').value).rstrip('/')
+        if not prefix.startswith('/'):
+            prefix = '/' + prefix
+        for cam_name in self.cameras:
+            ns = f'{prefix}/{cam_name}'
+            pubs = {
+                'mask':  self.create_publisher(
+                    Image, f'{ns}/semantic_mask', qos_profile_sensor_data),
+                'conf':  self.create_publisher(
+                    Image, f'{ns}/semantic_confidence', qos_profile_sensor_data),
+                'cloud': self.create_publisher(
+                    PointCloud2, f'{ns}/semantic_points', qos_profile_sensor_data),
+                'label': self.create_publisher(
+                    LabelInfo, f'{ns}/label_info', label_qos),
+            }
+            self._kiwi_pubs[cam_name] = pubs
+
+            # Build & publish the LabelInfo once. Late joiners pick it up
+            # via transient_local. No frame_id (kiwicampus doesn't read it).
+            label_msg = LabelInfo()
+            label_msg.header.stamp = self.get_clock().now().to_msg()
+            for cid, cname in self._KIWI_CLASS_NAMES.items():
+                vc = VisionClass()
+                vc.class_id = int(cid)
+                vc.class_name = cname
+                label_msg.class_map.append(vc)
+            pubs['label'].publish(label_msg)
+            self.get_logger().info(
+                f'  [{cam_name}] kiwicampus adapter: latched '
+                f'{len(self._KIWI_CLASS_NAMES)} classes on {ns}/label_info')
+
+    # =========================================================================
+    #  Serial sanity check  (Edit #4 — v3.2.2)
+    # =========================================================================
+
+    # MUST stay in sync with launch/zed_cameras.launch.py CAMERA_BINDINGS.
+    # Mapping verified per-port 2026-04-24 (cross-referenced against
+    # references/parsa_igvc/src/avros_bringup/launch/sensors.launch.py).
+    EXPECTED_SERIALS = {
+        'left':  43779087,
+        'front': 42569280,
+        'right': 49910017,
+    }
+
+    def _check_zed_serials(self) -> None:
+        """
+        Log which ZED serials are connected vs. what the launch expects.
+        Tier 1: ZED SDK device probe (real serials, definitive).
+        Tier 2: 5-second CameraInfo-presence timer (no SDK dep, informational).
+        Never raises — wrong cabling should produce loud logs, not a node crash.
+        """
+        try:
+            import pyzed.sl as sl
+            devices = sl.Camera.get_device_list()
+            connected = sorted(int(d.serial_number) for d in devices)
+            self.get_logger().info(
+                f'  ZED SDK reports {len(connected)} camera(s) connected: '
+                f'{connected}'
+            )
+            expected = set(self.EXPECTED_SERIALS.values())
+            missing = expected - set(connected)
+            extra = set(connected) - expected
+            for cam_name, want_sn in self.EXPECTED_SERIALS.items():
+                if want_sn in connected:
+                    self.get_logger().info(
+                        f'  [{cam_name}] serial {want_sn} OK')
+                else:
+                    self.get_logger().warn(
+                        f'  [{cam_name}] serial {want_sn} NOT connected — '
+                        f'check cable / power / config'
+                    )
+            if extra:
+                self.get_logger().warn(
+                    f'  Connected serials not in config: {sorted(extra)} '
+                    f'(extra cameras attached or serial mapping stale)'
+                )
+            return
+        except ImportError:
+            self.get_logger().info(
+                '  pyzed not installed — falling back to topic-presence '
+                'check in 5s (serial values not verified, only connectivity)'
+            )
+        except Exception as e:
+            self.get_logger().warn(
+                f'  ZED SDK device probe failed ({e}); '
+                f'falling back to topic-presence check')
+
+        # Tier 2 fallback: one-shot timer that fires after 5s and logs
+        # which cameras have produced a CameraInfo. Cheap, no SDK dep.
+        self._serial_probe_timer = self.create_timer(
+            5.0, self._on_serial_probe_fallback)
+
+    def _on_serial_probe_fallback(self) -> None:
+        try:
+            for cam_name, want_sn in self.EXPECTED_SERIALS.items():
+                cam = self.cameras.get(cam_name)
+                seen = bool(cam and cam.got_info)
+                level = (self.get_logger().info if seen
+                         else self.get_logger().warn)
+                level(
+                    f'  [{cam_name}] expected S/N {want_sn}: '
+                    f'CameraInfo {"received" if seen else "MISSING after 5s"}'
+                )
+        finally:
+            # One-shot; tear down so we don't spam the log.
+            self._serial_probe_timer.cancel()
+            self._serial_probe_timer = None
 
     # =========================================================================
     #  BEV grid
@@ -507,8 +747,22 @@ class BevPerceptionNode(Node):
                 cam = self.cameras[cam_name]
                 cam.rgb = img
                 cam.got_rgb = True
+                # Stamp/frame are only consumed by the kiwicampus adapter,
+                # but stashing them unconditionally keeps the lock-critical
+                # section uniform.
+                cam.rgb_stamp = msg.header.stamp
+                cam.rgb_frame_id = msg.header.frame_id
         except Exception as e:
             self.get_logger().warn(f'[{cam_name}] RGB convert error: {e}')
+
+    def _cloud_callback(self, cam_name: str, msg) -> None:
+        # Latest-stash, like the other sensor callbacks. The publish path in
+        # _perception_callback grabs whatever's freshest at tick time. Cheap
+        # — we don't deserialize, just hold the message reference.
+        with self._lock:
+            cam = self.cameras[cam_name]
+            cam.cloud = msg
+            cam.got_cloud = True
 
     def _depth_callback(self, cam_name: str, msg: Image):
         try:
@@ -602,12 +856,23 @@ class BevPerceptionNode(Node):
         # Snapshot camera state. `snaps[name] = (cam_ref, rgb, depth)`.
         # We keep a reference to the CameraState so the projection function
         # can use its precomputed LUT + mount pose fields directly.
+        # `kiwi_snaps[name] = (rgb_stamp, rgb_frame_id, cloud_msg)` — only
+        # populated when the kiwicampus adapter is on and the camera has
+        # both a fresh RGB stamp and an organized cloud. Cameras without a
+        # cloud are skipped from the per-camera publish but still go through
+        # the standalone BEV path normally.
+        kiwi_snaps: Dict[str, tuple] = {}
         with self._lock:
             snaps = {}
             for name, cam in self.cameras.items():
                 if (cam.got_rgb and cam.got_depth and cam.got_info
                         and cam.lut_built):
                     snaps[name] = (cam, cam.rgb.copy(), cam.depth.copy())
+                    if (self._kiwi_enabled and cam.got_cloud
+                            and cam.cloud is not None
+                            and cam.rgb_stamp is not None):
+                        kiwi_snaps[name] = (
+                            cam.rgb_stamp, cam.rgb_frame_id, cam.cloud)
         if not snaps:
             return
 
@@ -649,6 +914,13 @@ class BevPerceptionNode(Node):
                         self.get_logger().warn(
                             f'[{name}] seg inference error: {e}',
                             throttle_duration_sec=5.0)
+
+        # ---- Kiwicampus per-camera publish (path A, optional) ----
+        # Hooks the per-camera Tier 1 mask into Parsa's Nav2 stack via the
+        # kiwicampus semantic_segmentation_layer contract. Independent of
+        # the BEV mosaic — runs even if projection has issues.
+        if self._kiwi_enabled and self._kiwi_pubs and kiwi_snaps and seg_masks:
+            self._publish_kiwicampus(kiwi_snaps, seg_masks)
 
         # ---- Project each camera into the shared BEV --------------
         # Projection writes are serial (shared BEV canvas); this is fine
@@ -720,6 +992,83 @@ class BevPerceptionNode(Node):
                 f'seg={"ON" if seg_masks else "OFF"}  |  '
                 f'cal={"DONE" if self._auto_cal_done else "PENDING"}'
             )
+
+    # =========================================================================
+    #  Kiwicampus publish path — per-camera contract for Parsa's Nav2 stack
+    # =========================================================================
+
+    def _publish_kiwicampus(
+        self,
+        kiwi_snaps: Dict[str, tuple],
+        seg_masks:  Dict[str, np.ndarray],
+    ) -> None:
+        """
+        Publish the kiwicampus per-camera contract for each camera that has
+        both a fresh Tier-1 seg mask AND an organized cloud this tick.
+
+        Contract (all three messages share header.stamp = max(rgb, cloud)):
+          /perception/<cam>/semantic_mask        Image mono8, H×W = cloud H×W
+          /perception/<cam>/semantic_confidence  Image mono8, same H×W
+          /perception/<cam>/semantic_points      PointCloud2, original organized cloud
+
+        Mask resize uses INTER_NEAREST — class IDs are categorical so bilinear
+        would invent intermediate IDs.
+        """
+        for name, (rgb_stamp, rgb_frame_id, cloud_msg) in kiwi_snaps.items():
+            mask = seg_masks.get(name)
+            if mask is None:
+                continue
+            pubs = self._kiwi_pubs.get(name)
+            if pubs is None:
+                continue
+
+            cloud_h = int(cloud_msg.height)
+            cloud_w = int(cloud_msg.width)
+            if cloud_h <= 1 or cloud_w <= 0:
+                # Unorganized cloud — kiwicampus needs height>1 (image-shaped).
+                self.get_logger().warn(
+                    f'[{name}] kiwicampus: cloud is unorganized '
+                    f'({cloud_h}x{cloud_w}), skipping publish',
+                    throttle_duration_sec=10.0)
+                continue
+
+            if mask.shape != (cloud_h, cloud_w):
+                mask_pub = cv2.resize(
+                    mask, (cloud_w, cloud_h),
+                    interpolation=cv2.INTER_NEAREST)
+            else:
+                mask_pub = mask
+            # Tier 1 is binary per class — 255 wherever the mask is not
+            # background and not unknown.
+            conf_pub = np.where(
+                (mask_pub != CLASS_BACKGROUND) & (mask_pub != CLASS_UNKNOWN),
+                np.uint8(255), np.uint8(0),
+            ).astype(np.uint8)
+
+            # Shared stamp = max(rgb_stamp, cloud_stamp), like Parsa.
+            cloud_stamp = cloud_msg.header.stamp
+            if ((cloud_stamp.sec, cloud_stamp.nanosec) >
+                    (rgb_stamp.sec, rgb_stamp.nanosec)):
+                stamp = cloud_stamp
+            else:
+                stamp = rgb_stamp
+            frame_id = rgb_frame_id or cloud_msg.header.frame_id
+
+            mask_msg = self.bridge.cv2_to_imgmsg(mask_pub, encoding='mono8')
+            mask_msg.header.stamp = stamp
+            mask_msg.header.frame_id = frame_id
+            pubs['mask'].publish(mask_msg)
+
+            conf_msg = self.bridge.cv2_to_imgmsg(conf_pub, encoding='mono8')
+            conf_msg.header.stamp = stamp
+            conf_msg.header.frame_id = frame_id
+            pubs['conf'].publish(conf_msg)
+
+            # Relay the organized cloud with stamp rewritten to match the
+            # mask so kiwicampus's TimeSynchronizer pairs them. The cloud
+            # contents (points, fields) are passed through verbatim.
+            cloud_msg.header.stamp = stamp
+            pubs['cloud'].publish(cloud_msg)
 
     # =========================================================================
     #  VIZ LOOP — runs at viz_fps, publishes BGR images for humans
@@ -988,9 +1337,10 @@ class BevPerceptionNode(Node):
             CLASS_BACKGROUND: (0, 0, 0),         # transparent-ish
             CLASS_LANE_LINE:  (255, 255, 255),   # white
             CLASS_BARREL:     (0, 140, 255),     # safety orange (BGR)
-            CLASS_PERSON:     (0, 255, 255),     # yellow
             CLASS_POTHOLE:    (255, 0, 255),     # magenta
+            CLASS_PERSON:     (0, 255, 255),     # yellow
             CLASS_DRIVABLE:   (0, 180, 0),       # green
+            CLASS_UNKNOWN:    (128, 128, 128),   # gray
         }
 
     # =========================================================================

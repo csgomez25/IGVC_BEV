@@ -6,6 +6,52 @@ The pipeline takes synchronized RGB + depth from three ZED X cameras, projects e
 
 ---
 
+## Current status (2026-05-13, pre-competition)
+
+Quick honest snapshot of what's confirmed working on the Jetson Orin and what's still rough. See [CHANGELOG.md](CHANGELOG.md) for v3.2.2's specific changes and [TODO.md](TODO.md) for the engineering punch list.
+
+### ✅ What works
+
+- **Build succeeds** (`colcon build --packages-select avl_bev_perception --symlink-install`). Run from `~/chris/` with `--base-paths chris_comp/IGVC_BEV-main/avl_bev_perception_v3_2`, or symlink the package into `~/bev_ws/src/`.
+- **All 3 ZED X cameras open over SSH** and stream RGB + depth at 15 Hz on the v5.x topic paths.
+- **Serial mapping verified**: front=42569280, left=43779087, right=49910017 — wrapper confirms each on startup. Aligned with the team's `IGVC_ROS2` `sensors.launch.py`.
+- **End-to-end BEV pipeline runs**: all 10 `/bev/*` topics publish — `segmentation`, `drivable_mask`, `obstacle_mask`, `lane_lines_detected`, `perception_latency_ms`, `image_raw`, `fused`, `debug/{left,front,right}`.
+- **Auto-HSV calibration succeeds** at startup and produces sensible values (last run: white V_min 180→244, orange S_min 130→96 against asphalt V≈157 σ≈44).
+- **Standalone launch** ([`vision_test.launch.py`](avl_bev_perception_v3_2/avl_bev_perception/launch/vision_test.launch.py)) brings up the camera + perception stack with no IMU / LiDAR / Nav2 / actuator dependency. Works for quick iteration without the full robot.
+- **Foxglove bridge integration** — running [`ros2 run foxglove_bridge foxglove_bridge`](#) on the Jetson exposes all topics over WebSocket. Connect from a laptop browser at `ws://<jetson-ip>:8765`.
+
+### ⚠️ What's rough but workable
+
+- **BEV publish rate is ~4 Hz**, not the 20 Hz design target. Per-frame loop time ~225–250 ms on Orin with default config. Untuned. Three knobs in [`config/bev_config.yaml`](avl_bev_perception_v3_2/avl_bev_perception/config/bev_config.yaml) should bring it to 10–25 Hz — none have been tested yet:
+  - `bev.resolution: 0.05 → 0.10` (4× fewer cells)
+  - `perception.downsample_depth: 2 → 4` (4× fewer projection samples)
+  - `viz.enabled: true → false` (drops BGR overlay topics)
+- **Visual segmentation correctness is unconfirmed.** The pipeline produces topics; nobody has eyeballed `/bev/fused` to check that lane / barrel / pothole pixels actually land where they should. Foxglove is now wired up — this is the next test.
+
+### ❌ What doesn't work
+
+- **NoMachine sessions cannot open the ZED cameras** because the Argus pipeline needs GPU-backed EGL, and NoMachine's virtual X display doesn't provide it (`No current CUDA context available; nvbufsurface: Failed to create EGLImage`). This is a known JetPack/NoMachine limitation, not a bug in this package — Parsa's [CLAUDE.md](references/parsa_igvc/CLAUDE.md) documents the same symptom.
+- **SSH terminals can't open RViz** (no X display) — but cameras work fine in this mode.
+- **`rqt_image_view` from a `(base)` conda shell crashes** on Python 3.10 vs 3.12 ABI mismatch with rclpy. `conda deactivate` first or run `conda config --set auto_activate_base false`.
+
+### 🛠 Recommended workflow today/tomorrow
+
+Two SSH terminals on the Jetson + Foxglove on your laptop:
+
+```bash
+# Terminal 1 — perception (cameras open here, no display needed)
+ros2 launch avl_bev_perception vision_test.launch.py use_rviz:=false
+
+# Terminal 2 — bridge that exposes ROS topics over WebSocket
+ros2 run foxglove_bridge foxglove_bridge
+```
+
+On laptop: open `https://app.foxglove.dev` → **Open connection → Foxglove WebSocket → `ws://<jetson-ip>:8765`** → add Image panels for `/bev/fused`, `/bev/debug/{front,left,right}`.
+
+For the actual competition: **order an HDMI dummy plug** ($5, "HDMI EDID emulator 4K" on Amazon, 2-day shipping). Plug into the Jetson's HDMI port, NoMachine then mirrors a real DRM display, EGL works → cameras + RViz work in the same NoMachine session.
+
+---
+
 ## Hardware
 
 | Position | Model | Serial |
@@ -13,6 +59,9 @@ The pipeline takes synchronized RGB + depth from three ZED X cameras, projects e
 | Left  | ZED X | 43779087 |
 | Front | ZED X | 42569280 |
 | Right | ZED X | 49910017 |
+
+*(v3.2.2 mapping — verified per-port 2026-04-24, aligned with the team's
+IGVC_ROS2 sensors.launch.py. Pre-v3.2.2 had left/right swapped.)*
 
 Other onboard sensors (Velodyne VLP-16 LiDAR, Xsens MTi-680G IMU) are handled by separate packages and are **not** consumed here.
 
@@ -55,14 +104,19 @@ The node runs **two independent timers** so visualization can never bottleneck t
 
 **Class set (output of `/bev/segmentation` as mono8 class IDs):**
 
-| ID | Class | Source |
-|----|-------|--------|
-| 0 | background | — |
-| 1 | lane line | Tier 1 (HSV white) |
-| 2 | barrel | Tier 1 (HSV orange) |
-| 3 | person | Tier 2 (ONNX) |
-| 4 | pothole | Tier 2 (ONNX) |
-| 5 | drivable area | Tier 2 (ONNX) |
+| ID  | Class | Source |
+|-----|-------|--------|
+| 0   | background | — |
+| 1   | lane line | Tier 1 (HSV white) |
+| 2   | barrel | Tier 1 (HSV orange) |
+| 3   | pothole | Tier 1c (Otsu) or Tier 2 (ONNX) |
+| 4   | person | Tier 2 (ONNX) |
+| 5   | drivable area | Tier 2 (ONNX) |
+| 255 | unknown | reserved (LabelInfo sentinel) |
+
+*(v3.2.2 renumber — pothole moved 4→3, person 3→4, added 255=unknown — so
+IDs 0–3 + 255 match the team's `class_map.yaml` and the mask can publish
+to their kiwicampus contract without remapping.)*
 
 **Pothole-friendly height filter.** IGVC potholes are flat painted circles, not real holes. Classes that live on the ground plane (lane lines, potholes) are exempt from the lower height filter so they survive the projection.
 
@@ -73,9 +127,9 @@ The node runs **two independent timers** so visualization can never bottleneck t
 ### Subscribed (per camera, `<cam>` ∈ `left | front | right`)
 
 ```
-/zed_<cam>/zed_node/rgb/image_rect_color    sensor_msgs/Image
+/zed_<cam>/zed_node/rgb/color/rect/image    sensor_msgs/Image       # v5.x path (default since v3.2.2)
 /zed_<cam>/zed_node/depth/depth_registered  sensor_msgs/Image
-/zed_<cam>/zed_node/rgb/camera_info         sensor_msgs/CameraInfo
+/zed_<cam>/zed_node/rgb/color/rect/camera_info   sensor_msgs/CameraInfo
 ```
 
 If your ZED launch publishes under different names, edit `cam_defs` at the top of `_setup_cameras()` in `bev_perception_node.py`.
@@ -141,6 +195,28 @@ ros2 run rqt_image_view rqt_image_view /bev/fused
 ros2 topic hz /bev/obstacle_mask
 ```
 
+### Standalone vision testing (v3.2.2)
+
+Run BEV perception by itself — no Xsens, no Velodyne, no Nav2, no
+actuator. Useful for iterating on segmentation / projection without
+turning the whole robot on.
+
+```bash
+# Live cameras + BEV + RViz, nothing else
+ros2 launch avl_bev_perception vision_test.launch.py
+
+# Bag replay (off-Jetson dev, no cameras attached)
+ros2 launch avl_bev_perception vision_test.launch.py \
+    use_bag:=true bag_path:=/data/bev_session_20260513T...
+
+# Record a replay-able bag from the live robot
+./avl_bev_perception/tools/record_session.sh /data/run_42
+```
+
+The bag captures only the vision topics BEV needs (rgb rect,
+camera_info, depth_registered per camera) plus `/tf` and `/tf_static` —
+no IMU/LiDAR in scope.
+
 ---
 
 ## Configuration
@@ -167,7 +243,7 @@ Lighting changes (overcast, wet pavement, sunrise/sunset) will shift the white a
 python3 avl_bev_perception/tools/calibrate_hsv.py path/to/igvc_scene.jpg
 
 # Against a live camera feed
-python3 avl_bev_perception/tools/calibrate_hsv.py --topic /zed_front/zed_node/rgb/image_rect_color
+python3 avl_bev_perception/tools/calibrate_hsv.py --topic /zed_front/zed_node/rgb/color/rect/image
 ```
 
 Drag the trackbars until lines / barrels are cleanly highlighted, press `p` to print the YAML snippet, paste into `bev_config.yaml`, restart the node.

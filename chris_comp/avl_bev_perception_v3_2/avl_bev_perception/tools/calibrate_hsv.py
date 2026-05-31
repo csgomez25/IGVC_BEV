@@ -10,7 +10,8 @@ Usage:
   python3 calibrate_hsv.py path/to/igvc_scene.jpg
 
   # On a live ZED feed via ROS 2 (requires rclpy + cv_bridge installed):
-  python3 calibrate_hsv.py --topic /zed_front/zed_node/rgb/image_rect_color
+  python3 calibrate_hsv.py --topic /zed_front/zed_node/rgb/color/rect/image  # v5.x
+  # for older v4.x ZED wrapper: use /zed_front/zed_node/rgb/image_rect_color
 
 Workflow at the venue:
   1. Save a frame from each camera that has both white lines and an orange
