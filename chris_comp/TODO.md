@@ -4,13 +4,20 @@ Single source of truth for what's been done, what's pending, and what's verified
 
 If you check items off, **delete them** rather than striking through — keeps the file scannable.
 
-*Last updated: 2026-05-13. Re-diffed against Parsa's checkout 2026-05-30 — see "What I can contribute to Parsa's stack" below.*
+*Last updated: 2026-06-01. Re-diffed against Parsa's checkout 2026-05-30 — see "What I can contribute to Parsa's stack" below.*
 
 ---
 
 ## Done — verified
 
 These edits are on disk and have been sanity-checked (YAML parses, grep sweeps clean, named-constant routing confirmed). **Nothing here has been built with `colcon` or run on the live robot yet** — see "Verified" subsection below for the actual checks performed.
+
+### Parsa handoff prep + drop-in adapter param (2026-06-01)
+
+- **`kiwicampus.topic_prefix` param added** to [bev_perception_node.py](avl_bev_perception_v3_2/avl_bev_perception/avl_bev_perception/bev_perception_node.py) (declared) + [bev_config.yaml](avl_bev_perception_v3_2/avl_bev_perception/config/bev_config.yaml) (default `/perception`). The adapter builds contract topics as `{prefix}/{cam}/semantic_*` (slash-normalized); startup banner prints the active prefix. Lets the node be a zero-config drop-in for Parsa's `left`/`right` sources, or coexist with his front node under `/bev_perception`. *Verified:* `ast.parse` + `yaml.safe_load` clean; no stray hardcoded `/perception/` in active code (comments/docstrings only).
+- **[PROPOSAL_FOR_PARSA.md](PROPOSAL_FOR_PARSA.md) written** — self-contained go/no-go doc for Parsa: value vs. his single-class `sooner25`, three integration modes by effort, collision caveat, honest "not yet built/run on hardware" status, churn-insulation note (couples to the contract, not his tuning).
+- **Repo reorganized + uploaded.** Everything moved under `chris_comp/`; root [`.gitignore`](.gitignore) excludes `references/parsa_igvc/` (Parsa's IP / 165 MB / nested git), caches, `*.tgz`. Pushed to https://github.com/csgomez25/IGVC_BEV (`origin`/main).
+- **All `.md` docs reconciled** against Parsa's 2026-05-28→05-30 field-test commits (sooner25 default, soft-lane pivot, MPPI/EKF/GPS/footprint/inflation changes). See CLAUDE.md "Parsa-stack changes since 2026-05-21".
 
 ### v3.2.2 integration prep + standalone test bringup (2026-05-13)
 

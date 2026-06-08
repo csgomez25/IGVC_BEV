@@ -1,0 +1,76 @@
+# lane_cv default profile.
+# Sane starting point for a forward outdoor camera on asphalt with white paint.
+# To port to another car: copy this file, then adjust roi_poly, white/asphalt
+# HSV, and the line.* shape gates for that camera's resolution + mount.
+
+blur_ksize: 5
+blur_iters: 1   # 1 denoises without fragmenting thin lines
+
+# Region KEPT (normalized x,y). Drops the top 35% (sky/trees/far pavement).
+roi_poly:
+  - [0.0, 0.35]
+  - [1.0, 0.35]
+  - [1.0, 1.0]
+  - [0.0, 1.0]
+
+# How to combine color cues: tophat | white | white_gated | asphalt_inv
+#   tophat = contrast-relative local gate; robust to shadow AND bright concrete
+#   without per-venue retuning (default). The absolute white/asphalt gates below
+#   are still used by the white / white_gated / asphalt_inv modes.
+combine: tophat
+
+# Contrast-relative gate (combine: tophat). tophat_ksize MUST exceed the painted
+# line's stroke width in px at this camera/resolution.
+contrast:
+  tophat_ksize: 25
+  min_contrast: 18
+  v_min: 60
+
+white:
+  h_min: 0
+  h_max: 179
+  s_min: 0
+  s_max: 60
+  v_min: 200
+  v_max: 255
+
+asphalt:
+  enabled: true
+  h_min: 0
+  h_max: 179
+  s_min: 0
+  s_max: 95
+  v_min: 0
+  v_max: 210
+
+adaptive:
+  enabled: true
+  k: 2.5
+  period: 5
+  band: [0.55, 0.95]   # sample the V-floor from the near-field only
+
+open_ksize: 3
+
+# --- The speck killer. Lines are long+thin; specks/cracks are short+stubby. ---
+line:
+  min_area: 80
+  max_area: 40000
+  min_elongation: 4.0    # long_side/short_side; raise to reject more specks
+  max_fill: 0.75         # area/rect_area; a filled patch is not a line
+  orientation_gate: false
+  angle_center_deg: 90.0
+  angle_tol_deg: 35.0
+  hough_min_len_px: 0    # >0 to require a straight run of this many px
+  # Dashed-line recovery: link collinear short dashes into one line.
+  dash_link: true
+  dash_min_elongation: 1.8
+  dash_link_max_gap_px: 70.0
+  dash_link_angle_tol_deg: 14.0
+  dash_link_min_segments: 3
+
+temporal:
+  window: 3
+  min_hits: 2
+
+meters_per_px: 0.0
+notes: "default forward-camera asphalt profile"

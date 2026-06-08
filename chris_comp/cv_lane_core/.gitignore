@@ -1,0 +1,3 @@
+_artifacts/
+__pycache__/
+*.pyc

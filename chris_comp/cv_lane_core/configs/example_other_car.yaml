@@ -1,0 +1,59 @@
+# Example "port to another car" profile.
+#
+# Hypothetical second vehicle: lower, wider camera, glossier asphalt that
+# throws more specks/cracks, lanes that run near-vertical in the image. Only a
+# handful of values change vs. default.yaml — no code edits. This file exists
+# to show WHICH knobs you typically touch when moving to a new robot.
+
+blur_ksize: 7          # noisier sensor -> blur harder
+blur_iters: 3
+
+roi_poly:              # camera sits lower -> keep a taller slice
+  - [0.0, 0.25]
+  - [1.0, 0.25]
+  - [1.0, 1.0]
+  - [0.0, 1.0]
+
+combine: white_gated
+
+white:
+  h_min: 0
+  h_max: 179
+  s_min: 0
+  s_max: 50            # tighter -> reject faintly-tinted concrete
+  v_min: 210
+  v_max: 255
+
+asphalt:
+  enabled: true
+  h_min: 0
+  h_max: 179
+  s_min: 0
+  s_max: 90
+  v_min: 0
+  v_max: 200
+
+adaptive:
+  enabled: true
+  k: 3.0               # glossier surface -> push the floor higher
+  period: 5
+  band: [0.5, 0.92]
+
+open_ksize: 3
+
+line:
+  min_area: 120        # higher resolution -> real lines are bigger
+  max_area: 60000
+  min_elongation: 6.0  # KEY: stricter shape gate kills the extra specks
+  max_fill: 0.6
+  orientation_gate: true   # these lanes run near-vertical; gate on it
+  angle_center_deg: 90.0
+  angle_tol_deg: 30.0
+  hough_min_len_px: 40     # also require a straight 40px run
+
+temporal:
+  window: 4
+  min_hits: 3          # demand more agreement on a flickery sensor
+
+meters_per_px: 0.012
+notes: "example second-vehicle profile (illustrative)"

@@ -200,6 +200,35 @@ The planner subscribes to `/bev/lane_lines_detected` to switch behavior
 trees between lane-keeping and GPS-waypoint modes for the IGVC offroad
 section.
 
+#### kiwicampus adapter (joint deployment with Parsa's Nav2)
+
+For plugging into Parsa's `IGVC_ROS2` stack, the node can *also* emit the
+kiwicampus `semantic_segmentation_layer` contract per camera. Set
+`kiwicampus.enabled: true` in `config/bev_config.yaml` (default `false` —
+standalone `/bev/*` is unchanged). It then publishes, per camera:
+
+```
+<prefix>/<cam>/semantic_mask        mono8   (class IDs)
+<prefix>/<cam>/semantic_confidence  mono8
+<prefix>/<cam>/semantic_points      PointCloud2 (organized cloud relay)
+<prefix>/<cam>/label_info           vision_msgs/LabelInfo (latched)
+```
+
+`<prefix>` is the `kiwicampus.topic_prefix` param (default `/perception`):
+
+- **`/perception`** (default) — matches the source topics Parsa's
+  `nav2_params_humble.yaml` `semantic_layer` already expects, so running
+  this node for `left`/`right` fills his configured-but-empty sources with
+  no YAML edits and no collision (his `perception_node` is front-only).
+- **`/bev_perception`** — run alongside his front `perception_node` without
+  a topic collision, then add the prefixed topics as an extra
+  `observation_source`.
+
+Needs `ros-${ROS_DISTRO}-vision-msgs` (lazy import — absent → adapter
+self-disables, node still runs). See `../../PROPOSAL_FOR_PARSA.md` and
+`../../KIWICAMPUS_DEBUG.md` for the full integration story and the five
+silent-drop gates.
+
 ## Configuration
 
 All tunables live in `config/bev_config.yaml` — BEV grid bounds, mount

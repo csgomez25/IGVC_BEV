@@ -200,6 +200,7 @@ ros2 launch avl_bev_perception bev_perception.launch.py \
 **What was added**
 
 - **Param** `kiwicampus.enabled` (bool, default `false`) — the master gate.
+- **Param** `kiwicampus.topic_prefix` (str, default `/perception`) — namespace prefix for the per-camera contract topics. Default drops straight into Parsa's `semantic_layer` sources (and fills his empty `left`/`right`); set to `/bev_perception` to run alongside his front `perception_node` without a topic collision and add the prefixed topics as a second `observation_source`.
 - **Param** `cameras.<cam>.cloud_topic` per camera (defaults to ZED v5's `/zed_<cam>/zed_node/point_cloud/cloud_registered`).
 - **Subscriber** (per camera, only when enabled): the organized `PointCloud2` from the ZED, latest-stashed on `CameraState.cloud`.
 - **Publishers** (per camera, only when enabled): `/perception/<cam>/semantic_mask` (mono8), `/perception/<cam>/semantic_confidence` (mono8), `/perception/<cam>/semantic_points` (PointCloud2 relay), `/perception/<cam>/label_info` (`vision_msgs/LabelInfo`, **latched** with `transient_local + reliable, depth=1`).

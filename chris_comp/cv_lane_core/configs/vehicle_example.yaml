@@ -1,0 +1,117 @@
+# vehicle_example.yaml — the ONE file a new robot edits to stand up BEV.
+#
+# Describes a multi-camera rig: the shared ground grid (meters) plus each
+# camera's detection profile + how its pixels reach the ground. Copy this,
+# rename per robot, run the calibration tool to fill in H / extrinsics.
+#
+#   from lane_cv import Rig
+#   rig = Rig.from_yaml("configs/vehicle_example.yaml")
+#   out = rig.process({"front": bgr}, depths={"front": depth})
+
+# Shared metric BEV canvas, REP-103 vehicle frame (X fwd, Y left, Z up).
+grid:
+  x_range: [0.0, 6.0]     # forward coverage, meters
+  y_range: [-3.0, 3.0]    # left/right coverage, meters (negative = right)
+  resolution: 0.05        # meters per pixel  -> 120 x 120 px grid
+
+cameras:
+  # --- ZED X depth cameras. Mounts are the REAL measured robot extrinsics,
+  # taken from Parsa's URDF (references/.../avros.urdf.xacro, resurveyed
+  # 2026-05-06). base_link = chassis center at GROUND level; rpy is the URDF
+  # mount orientation in radians. Intrinsics fx/fy/cx/cy come from each
+  # camera's CameraInfo — the placeholders below are for a 1280x720 ZED X.
+  #
+  # FRONT is physically tilted 15 deg down (pitch=0.2618) — the reason the
+  # old yaw-only projector was wrong. The full roll/pitch/yaw model now
+  # handles it. Left/right are level, rotated +/-90 deg about Z (face sideways).
+  - name: front
+    detect_profile: bright_concrete.yaml   # relative to THIS yaml's folder
+    projection:
+      mode: depth
+      fx: 700.0
+      fy: 700.0
+      cx: 640.0
+      cy: 360.0
+      extrinsics:           # URDF zed_front_mount_joint
+        x: 0.6795           # forward from base_link, meters
+        y: 0.0              # left
+        z: 0.4476           # up  (xsens_height 0.5556 - 0.108)
+        roll: 0.0
+        pitch: 0.2618       # 15 deg down tilt
+        yaw: 0.0
+      depth_range: [0.3, 20.0]
+      height_range: [-0.5, 2.5]
+
+  - name: left
+    detect_profile: bright_concrete.yaml
+    projection:
+      mode: depth
+      fx: 700.0
+      fy: 700.0
+      cx: 640.0
+      cy: 360.0
+      extrinsics:           # URDF zed_left_mount_joint
+        x: 0.098
+        y: 0.286
+        z: 0.6126
+        roll: 0.0
+        pitch: 0.0
+        yaw: 1.5708         # +90 deg, faces left (+Y)
+      depth_range: [0.3, 20.0]
+      height_range: [-0.5, 2.5]
+
+  - name: right
+    detect_profile: bright_concrete.yaml
+    projection:
+      mode: depth
+      fx: 700.0
+      fy: 700.0
+      cx: 640.0
+      cy: 360.0
+      extrinsics:           # URDF zed_right_mount_joint
+        x: 0.098
+        y: -0.286
+        z: 0.6126
+        roll: 0.0
+        pitch: 0.0
+        yaw: -1.5708        # -90 deg, faces right (-Y)
+      depth_range: [0.3, 20.0]
+      height_range: [-0.5, 2.5]
+
+  # --- USB / laptop test camera: use the homography projector. --------------
+  # H maps image pixel (u,v) -> ground (x,y) meters. Produced by
+  # tools/calibrate_extrinsics.py from >=4 clicked ground points. The 3x3
+  # below is an identity placeholder — replace with a real calibration.
+  - name: usb_test
+    detect_profile: default.yaml      # shorthand for: segmentation.backend=classical
+    projection:
+      mode: homography
+      H:
+        - [1.0, 0.0, 0.0]
+        - [0.0, 1.0, 0.0]
+        - [0.0, 0.0, 1.0]
+
+  # --- YOLO object camera (people, cars, dogs, cats, lights, stop signs...). -
+  # Uncomment to enable. Requires `pip install ultralytics` (optional dep — the
+  # core library imports fine without it; only this camera needs it). Detected
+  # objects become CLASS_OBSTACLE in the BEV grid via the class registry.
+  #
+  # - name: front_objects
+  #   segmentation:
+  #     backend: yolo
+  #     model: yolo11n.pt        # nano weights, auto-downloaded by ultralytics
+  #     conf: 0.35
+  #     device: cuda:0           # 'cpu' if no GPU
+  #     # keep: [person, car, dog, cat, traffic_light, stop_sign]  # optional filter
+  #   projection:
+  #     mode: depth              # objects have height -> depth projects them right
+  #     fx: 700.0
+  #     fy: 700.0
+  #     cx: 640.0
+  #     cy: 360.0
+  #     extrinsics: { x: 0.30, y: 0.0, z: 0.60, yaw: 0.0 }
+
+  # --- Road / sidewalk segmentation (FUTURE — needs a model picked first). ---
+  #   segmentation:
+  #     backend: road_seg        # RoadSegProvider is a stub today; see TODO §6
+  #     model: segformer_b0_cityscapes.onnx

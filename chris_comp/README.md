@@ -295,31 +295,20 @@ For the full design breakdown, timer architecture, projection math, and tuning r
 
 ## Pushing this to GitHub
 
-If you don't already have a repo:
+Live at **https://github.com/csgomez25/IGVC_BEV** (`origin`, SSH). Everything lives under `chris_comp/`; the root [`.gitignore`](.gitignore) excludes Parsa's `references/parsa_igvc/` reference checkout (his IP / 165 MB / its own git repo), Python caches, and local `*.tgz` bundles.
+
+Routine update:
 
 ```bash
-cd avl_bev_perception_repo
-
-# Create the repo on github.com first (empty, no README/license/gitignore — we have ours).
-
-git init
-git add .
-git commit -m "Initial commit: avl_bev_perception v3 (IGVC AutoNav)"
-git branch -M main
-git remote add origin git@github.com:<your-username>/<your-repo-name>.git
-git push -u origin main
+cd /home/chris/IGVC_BEV
+git add -A
+git commit -m "<message>"
+git push origin main
 ```
 
-If the repo already exists and you're updating it:
-
-```bash
-cd avl_bev_perception_repo
-git add .
-git commit -m "Add v3 IGVC perception build"
-git push
-```
-
-> **Note:** the package itself lives under `avl_bev_perception/` inside this repo. If you'd rather keep your colcon workspace structure flat, you can move just the inner `avl_bev_perception/` folder into your `src/` directory — it's a self-contained ROS 2 package.
+> **`references/` is intentionally never pushed.** It's a read-only reference checkout of Parsa's stack — see [CLAUDE.md](CLAUDE.md). To share work with Parsa, send `PROPOSAL_FOR_PARSA.md` + the package bundle, not a repo push.
+>
+> **Note:** the package itself lives under `avl_bev_perception_v3_2/avl_bev_perception/` inside this repo. If you'd rather keep your colcon workspace structure flat, move just the inner `avl_bev_perception/` folder into your `src/` directory — it's a self-contained ROS 2 package.
 
 ---
 
